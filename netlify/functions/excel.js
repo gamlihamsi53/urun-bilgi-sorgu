@@ -1,6 +1,6 @@
 const XLSX = require("xlsx");
 
-const ONEDRIVE_XLSX_URL = "https://1drv.ms/x/c/5e38cf4df60786e7/IQDRH_yMYQbeS7QHKUC0YdnrAaG1m5KBMun6eBzFMrsotRU?e=igHqiY"; // <- OneDrive VIEW linkini buraya yapıştır
+const ONEDRIVE_XLSX_URL = "https://1drv.ms/x/c/5e38cf4df60786e7/IQDRH_yMYQbeS7QHKUC0YdnrAaG1m5KBMun6eBzFMrsotRU?e=Y53nit"; // <- OneDrive VIEW linkini buraya yapıştır
 
 const SHEET_NAME = "Mal Tanımı";
 const COL_KEY = "Ürün Açıklaması";
