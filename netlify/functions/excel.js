@@ -1,6 +1,6 @@
 const XLSX = require("xlsx");
 
-const ONEDRIVE_XLSX_URL = "https://1drv.ms/x/c/5e38cf4df60786e7/IQDRH_yMYQbeS7QHKUC0YdnrAaG1m5KBMun6eBzFMrsotRU?e=Y53nit"; // <- OneDrive VIEW linkini buraya yapıştır
+const ONEDRIVE_XLSX_URL = "https://onedrive.live.com/:x:/g/personal/5E38CF4DF60786E7/IQDRH_yMYQbeS7QHKUC0YdnrAaG1m5KBMun6eBzFMrsotRU?resid=5E38CF4DF60786E7!s8cfc1fd106614bdeb4072940b461d9eb&ithint=file%2Cxlsx&e=Y53nit&migratedtospo=true&redeem=aHR0cHM6Ly8xZHJ2Lm1zL3gvYy81ZTM4Y2Y0ZGY2MDc4NmU3L0lRRFJIX3lNWVFiZVM3UUhLVUMwWWRuckFhRzFtNUtCTXVuNmVCekZNcnNvdFJVP2U9WTUzbml0"; // <- OneDrive VIEW linkini buraya yapıştır
 
 const SHEET_NAME = "Mal Tanımı";
 const COL_KEY = "Ürün Açıklaması";
