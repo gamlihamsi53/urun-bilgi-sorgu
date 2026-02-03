@@ -1,7 +1,7 @@
 const XLSX = require("xlsx");
 
 const ONEDRIVE_XLSX_URL =
-  "https://onedrive.live.com/download.aspx?resid=5E38CF4DF60786E7!8341D4774B0845D1987763213E7BE629";
+  "https://onedrive.live.com/download?resid=5E38CF4DF60786E7!8341D4774B0845D1987763213E7BE629&authkey=!ABCDEF123456";
 
 const SHEET_NAME = "Mal Tanımı";
 const COL_KEY = "Ürün Açıklaması";
