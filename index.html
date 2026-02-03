@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ürün Bilgi Sorgu</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 20px; max-width: 980px; margin: 0 auto; }
+    h1 { margin: 0 0 10px; font-size: 22px; }
+    .muted { color:#666; font-size: 13px; line-height: 1.35; }
+    .row { display:flex; gap:10px; align-items:flex-start; margin-top: 12px; flex-wrap: wrap; }
+    .inputWrap { flex: 1; min-width: 280px; position: relative; }
+    input { width:100%; padding: 12px; font-size: 16px; border:1px solid #ddd; border-radius: 10px; }
+    button { padding: 11px 14px; font-size: 15px; border:1px solid #ddd; background:#fff; border-radius: 10px; cursor:pointer; }
+    button:active { transform: translateY(1px); }
+    .status { margin-top: 12px; padding: 10px 12px; background:#fafafa; border:1px solid #eee; border-radius: 12px; }
+    .card { margin-top: 14px; border:1px solid #eee; border-radius: 14px; padding: 14px; }
+    table { width:100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { text-align:left; padding: 10px 8px; border-bottom:1px solid #f0f0f0; font-size: 14px; vertical-align: top; }
+    th { color:#444; width: 44%; }
+    .pill { display:inline-block; padding: 2px 8px; border:1px solid #e5e5e5; border-radius: 999px; font-size:12px; color:#555; }
+    .top { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; flex-wrap: wrap; }
+    .title { font-size:18px; margin-top:8px; font-weight:600; }
+
+    /* Listbox (autocomplete) */
+    .listbox {
+      position: absolute;
+      left: 0; right: 0;
+      top: calc(100% + 6px);
+      border: 1px solid #e7e7e7;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.08);
+      max-height: 260px;
+      overflow: auto;
+      display: none;
+      z-index: 50;
+    }
+    .opt {
+      padding: 10px 12px;
+      cursor: pointer;
+      font-size: 14px;
+      border-bottom: 1px solid #f3f3f3;
+    }
+    .opt:last-child { border-bottom: none; }
+    .opt:hover, .opt.active { background: #f6f6f6; }
+    .hl { font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>Ürün Bilgi Sorgu</h1>
+  <div class="muted">
+    Kaynak: OneDrive Excel (Netlify Function üzerinden). İlk yüklemede indirir, sonra telefonda cache’ler (offline çalışır).
+  </div>
+
+  <div class="row">
+    <div class="inputWrap">
+      <input id="q" placeholder="Ürün açıklaması yaz... (örn: 400)" autocomplete="off" />
+      <div id="listbox" class="listbox" role="listbox" aria-label="Ürün önerileri"></div>
+    </div>
+    <button id="btn">Ara</button>
+    <button id="refresh">Güncelle</button>
+    <button id="clearCache">Cache Sil</button>
+  </div>
+
+  <div class="status" id="status">Hazır. Yazmaya başlayabilirsin.</div>
+
+  <div class="card" id="result" style="display:none;">
+    <div class="top">
+      <div>
+        <div class="pill" id="sourcePill">—</div>
+        <div class="title" id="productName">—</div>
+      </div>
+      <div class="muted" id="cacheInfo" style="text-align:right;"></div>
+    </div>
+
+    <table>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    /************** API **************/
+    const API_URL = "/.netlify/functions/excel";
+
+    /************** Excel alanları **************/
+    const COL_KEY = "Ürün Açıklaması";
+    const FIELDS = [
+      "KDV Oranı",
+      "Birim",
+      "Alış Fiyatı (KDV Hariç)",
+      "Son Satın Alma Tarihi",
+      "Liste Fiyatı (KDV Hariç)",
+      "Son Liste Fiyat Güncelleme Tarihi",
+      "Marj",
+      "Stok"
+    ];
+
+    /************** Cache **************/
+    const CACHE_DATA = "urun_sorgu_v2_data";
+    const CACHE_META = "urun_sorgu_v2_meta";
+    const MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 gün
+
+    const el = (id) => document.getElementById(id);
+
+    const normalize = (s) =>
+      (s ?? "")
+        .toString()
+        .trim()
+        .toLocaleLowerCase("tr-TR")
+        .replace(/\s+/g, " ");
+
+    function setStatus(msg) { el("status").textContent = msg; }
+
+    function loadCache() {
+      try {
+        const data = JSON.parse(localStorage.getItem(CACHE_DATA) || "null");
+        const meta = JSON.parse(localStorage.getItem(CACHE_META) || "null");
+        if (!data || !meta) return null;
+        return { data, meta };
+      } catch { return null; }
+    }
+
+    function saveCache(data) {
+      const meta = { savedAt: new Date().toISOString() };
+      localStorage.setItem(CACHE_DATA, JSON.stringify(data));
+      localStorage.setItem(CACHE_META, JSON.stringify(meta));
+      return meta;
+    }
+
+    function cacheFresh(meta) {
+      if (!meta?.savedAt) return false;
+      const age = Date.now() - new Date(meta.savedAt).getTime();
+      return age >= 0 && age <= MAX_AGE_MS;
+    }
+
+    function clearCache() {
+      localStorage.removeItem(CACHE_DATA);
+      localStorage.removeItem(CACHE_META);
+    }
+
+    /************** Global data **************/
+    let DATA = null; // { items:[], map:{}, updatedAt:"" }
+
+    async function fetchData() {
+      const resp = await fetch(API_URL, { cache: "no-store" });
+      if (!resp.ok) throw new Error("API hata: HTTP " + resp.status);
+      const json = await resp.json();
+      if (json.error) throw new Error(json.error);
+      return json;
+    }
+
+    async function ensureData(preferCache = true) {
+      const cached = loadCache();
+      if (preferCache && cached?.data && cacheFresh(cached.meta)) {
+        DATA = cached.data;
+        setStatus("Cache yüklendi (offline hazır). Güncelle ile OneDrive’dan yenileyebilirsin.");
+        return { source: "cache", meta: cached.meta };
+      }
+
+      setStatus("Güncel veri çekiliyor...");
+      const data = await fetchData();
+      const meta = saveCache(data);
+      DATA = data;
+      setStatus("Güncel veri yüklendi.");
+      return { source: "api", meta };
+    }
+
+    /************** Listbox (autocomplete) **************/
+    const listbox = el("listbox");
+    let activeIndex = -1;
+    let currentOptions = [];
+
+    function hideListbox() {
+      listbox.style.display = "none";
+      listbox.innerHTML = "";
+      activeIndex = -1;
+      currentOptions = [];
+    }
+
+    function showListbox() {
+      if (currentOptions.length === 0) { hideListbox(); return; }
+      listbox.style.display = "block";
+    }
+
+    function escapeHTML(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function highlight(text, needle) {
+      const t = String(text);
+      const n = String(needle);
+      const idx = t.toLocaleLowerCase("tr-TR").indexOf(n.toLocaleLowerCase("tr-TR"));
+      if (idx < 0 || !n) return escapeHTML(t);
+      const a = escapeHTML(t.slice(0, idx));
+      const b = escapeHTML(t.slice(idx, idx + n.length));
+      const c = escapeHTML(t.slice(idx + n.length));
+      return `${a}<span class="hl">${b}</span>${c}`;
+    }
+
+    function renderOptions(query) {
+      const qn = normalize(query);
+      if (!DATA?.items || !qn) { hideListbox(); return; }
+
+      // İçerenleri getir (Excel gibi)
+      const opts = [];
+      for (const item of DATA.items) {
+        if (normalize(item).includes(qn)) opts.push(item);
+        if (opts.length >= 20) break; // max 20 öneri
+      }
+
+      currentOptions = opts;
+      activeIndex = -1;
+
+      listbox.innerHTML = opts
+        .map((o, i) => `<div class="opt" data-i="${i}">${highlight(o, query)}</div>`)
+        .join("");
+
+      showListbox();
+    }
+
+    function setActive(i) {
+      const nodes = Array.from(listbox.querySelectorAll(".opt"));
+      nodes.forEach(n => n.classList.remove("active"));
+      if (i >= 0 && i < nodes.length) {
+        nodes[i].classList.add("active");
+        nodes[i].scrollIntoView({ block: "nearest" });
+        activeIndex = i;
+      }
+    }
+
+    function chooseOption(i) {
+      if (i < 0 || i >= currentOptions.length) return;
+      el("q").value = currentOptions[i];
+      hideListbox();
+      doSearch(); // seçince otomatik ara
+    }
+
+    listbox.addEventListener("mousedown", (e) => {
+      const opt = e.target.closest(".opt");
+      if (!opt) return;
+      const i = Number(opt.dataset.i);
+      chooseOption(i);
+    });
+
+    /************** Arama & sonuç **************/
+    function findRowByName(name) {
+      if (!DATA?.map) return null;
+
+      const key = normalize(name);
+      if (DATA.map[key]) return { row: DATA.map[key], mode: "tam" };
+
+      // kısmi: ilk match
+      const hitKey = Object.keys(DATA.map).find(k => k.includes(key));
+      if (hitKey) return { row: DATA.map[hitKey], mode: "kısmi" };
+
+      return null;
+    }
+
+    function renderResult(row, info, mode) {
+      el("result").style.display = "block";
+      el("productName").textContent = row[COL_KEY] || "—";
+
+      el("sourcePill").textContent =
+        (info.source === "cache" ? "Cache (offline)" : "Güncel") + (mode === "kısmi" ? " • kısmi eşleşme" : "");
+
+      const savedAt = info.meta?.savedAt ? new Date(info.meta.savedAt).toLocaleString("tr-TR") : "-";
+      const updatedAt = DATA?.updatedAt ? new Date(DATA.updatedAt).toLocaleString("tr-TR") : "-";
+      el("cacheInfo").innerHTML = `Cache zamanı:<br><b>${savedAt}</b><br>Kaynak güncelleme:<br><b>${updatedAt}</b>`;
+
+      const tbody = el("tbody");
+      tbody.innerHTML = "";
+
+      for (const f of FIELDS) {
+        const tr = document.createElement("tr");
+        const th = document.createElement("th");
+        const td = document.createElement("td");
+        th.textContent = f;
+        const val = row[f];
+        td.textContent = (val === undefined || val === null || val === "") ? "—" : String(val);
+        tr.appendChild(th);
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function doSearch() {
+      const q = el("q").value.trim();
+      if (!q) { setStatus("Ürün açıklaması yaz."); return; }
+
+      let info;
+      try {
+        info = await ensureData(true);
+      } catch (e) {
+        const cached = loadCache();
+        if (cached?.data) {
+          DATA = cached.data;
+          info = { source: "cache", meta: cached.meta };
+          setStatus("İnternet/OneDrive erişimi yok; cache ile devam ediyorum (offline).");
+        } else {
+          setStatus("Hata: " + e.message);
+          return;
+        }
+      }
+
+      const hit = findRowByName(q);
+      if (!hit) {
+        setStatus("Bulunamadı. Yazdıkça listeden seçmeyi dene.");
+        el("result").style.display = "none";
+        return;
+      }
+
+      renderResult(hit.row, info, hit.mode);
+      setStatus("Hazır.");
+    }
+
+    async function forceRefresh() {
+      try {
+        setStatus("Güncelleme: yeni veri çekiliyor...");
+        const data = await fetchData();
+        const meta = saveCache(data);
+        DATA = data;
+        setStatus("Güncel veri yüklendi. Arayabilirsin.");
+      } catch (e) {
+        setStatus("Güncelleme hatası: " + e.message);
+      }
+    }
+
+    /************** Events **************/
+    el("btn").addEventListener("click", doSearch);
+    el("refresh").addEventListener("click", forceRefresh);
+    el("clearCache").addEventListener("click", () => {
+      clearCache();
+      hideListbox();
+      el("result").style.display = "none";
+      setStatus("Cache silindi.");
+    });
+
+    // Yazdıkça öneriler
+    el("q").addEventListener("input", (e) => {
+      renderOptions(e.target.value);
+    });
+
+    // Klavye ile gezinme (↑ ↓ Enter Esc)
+    el("q").addEventListener("keydown", (e) => {
+      if (listbox.style.display === "block") {
+        if (e.key === "ArrowDown") { e.preventDefault(); setActive(activeIndex + 1); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); setActive(activeIndex - 1); }
+        else if (e.key === "Enter") {
+          if (activeIndex >= 0) { e.preventDefault(); chooseOption(activeIndex); }
+          else { doSearch(); }
+        } else if (e.key === "Escape") {
+          hideListbox();
+        }
+      } else {
+        if (e.key === "Enter") doSearch();
+      }
+    });
+
+    // Dışarı tıklayınca listbox kapat
+    document.addEventListener("click", (e) => {
+      const wrap = e.target.closest(".inputWrap");
+      if (!wrap) hideListbox();
+    });
+
+    // Sayfa açılır açılmaz cache yükle
+    (async () => {
+      try { await ensureData(true); } catch {}
+    })();
+  </script>
+</body>
+</html>
