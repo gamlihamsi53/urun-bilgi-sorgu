@@ -1,6 +1,7 @@
 const XLSX = require("xlsx");
 
-const ONEDRIVE_XLSX_URL = "https://onedrive.live.com/download.aspx?resid=5E38CF4DF60786E7!8341D4774B0845D1987763213E7BE629";
+const ONEDRIVE_XLSX_URL =
+  "https://onedrive.live.com/download.aspx?resid=5E38CF4DF60786E7!8341D4774B0845D1987763213E7BE629";
 
 const SHEET_NAME = "Mal Tanımı";
 const COL_KEY = "Ürün Açıklaması";
@@ -26,11 +27,11 @@ function normalizeTR(s) {
 
 exports.handler = async () => {
   try {
-    if (!ONEDRIVE_XLSX_URL || ONEDRIVE_XLSX_URL.includes("PASTE_")) {
+    if (!ONEDRIVE_XLSX_URL) {
       return {
         statusCode: 500,
         headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify({ error: "ONEDRIVE_XLSX_URL ayarlanmadı (OneDrive VIEW linkini yapıştır)." })
+        body: JSON.stringify({ error: "ONEDRIVE_XLSX_URL boş." })
       };
     }
 
@@ -40,34 +41,26 @@ exports.handler = async () => {
       "cache-control": "public, max-age=600, stale-while-revalidate=86400"
     };
 
-    const candidates = [
-      ONEDRIVE_XLSX_URL,
-      ONEDRIVE_XLSX_URL + (ONEDRIVE_XLSX_URL.includes("?") ? "&" : "?") + "download=1"
-    ];
-
-    let arrayBuffer = null;
-    let lastErr = null;
-
-    for (const url of candidates) {
-      try {
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        arrayBuffer = await resp.arrayBuffer();
-        break;
-      } catch (e) {
-        lastErr = e;
-      }
+    const resp = await fetch(ONEDRIVE_XLSX_URL, { redirect: "follow" });
+    if (!resp.ok) {
+      throw new Error("OneDrive HTTP " + resp.status);
     }
 
-    if (!arrayBuffer) throw lastErr || new Error("Dosya indirilemedi.");
+    const contentType = resp.headers.get("content-type") || "";
+    const buf = await resp.arrayBuffer();
 
-    const wb = XLSX.read(arrayBuffer, { type: "array" });
+    // OneDrive bazen HTML sayfa döndürebiliyor (indirilemediyse).
+    // XLSX okumadan önce hızlı kontrol:
+    if (contentType.includes("text/html")) {
+      throw new Error("OneDrive HTML döndürdü (download link doğru mu?).");
+    }
+
+    const wb = XLSX.read(buf, { type: "array" });
     const ws = wb.Sheets[SHEET_NAME];
     if (!ws) throw new Error(`Sheet bulunamadı: "${SHEET_NAME}"`);
 
     const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
-    // Autocomplete listesi + map
     const items = [];
     const map = {};
 
@@ -93,8 +86,8 @@ exports.handler = async () => {
         sheet: SHEET_NAME,
         keyColumn: COL_KEY,
         fields: FIELDS,
-        items, // listbox için
-        map    // arama için
+        items,
+        map
       })
     };
   } catch (e) {
