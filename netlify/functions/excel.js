@@ -1,7 +1,7 @@
 const XLSX = require("xlsx");
 
 // ✅ Buraya OneDrive paylaşım linkini (1drv.ms) koy
-const SHARE_URL = "https://1drv.ms/x/c/5e38cf4df60786e7/IQB31EGDCEvRRZh3YyE-e-YpAZ-yvD7Vht4PZgSne2OyCvE?e=7LkLA6";
+const SHARE_URL = "https://1drv.ms/x/c/5e38cf4df60786e7/IQDRH_yMYQbeS7QHKUC0YdnrAaG1m5KBMun6eBzFMrsotRU?e=7a1Jst";
 
 const SHEET_NAME = "Mal Tanımı";
 const COL_KEY = "Ürün Açıklaması";
