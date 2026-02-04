@@ -45,18 +45,24 @@ function buildDownloadUrl(resid, authkey) {
 async function resolveToDownloadUrl(shareUrl, debug) {
   let cur = shareUrl;
 
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 15; i++) {
     debug.step = `redirect_${i}`;
     const resp = await fetch(cur, { redirect: "manual" });
 
+    // 1) Header redirect
     if ([301, 302, 303, 307, 308].includes(resp.status)) {
       const loc = resp.headers.get("location");
-      if (!loc) break;
+      if (!loc) throw new Error(`Redirect HTTP ${resp.status} ama Location yok`);
       cur = absUrl(loc, cur);
       continue;
     }
 
-    // Redirect bitince URL’de resid/authkey yakalamayı dene
+    // Redirect değilse status kontrol
+    if (!resp.ok) {
+      throw new Error(`Redirect olmayan cevap: HTTP ${resp.status}`);
+    }
+
+    // 2) URL üzerinde resid/authkey var mı?
     const residFromUrl = pickParam(cur, "resid");
     const authFromUrl = pickParam(cur, "authkey");
     if (residFromUrl && authFromUrl) {
@@ -64,32 +70,58 @@ async function resolveToDownloadUrl(shareUrl, debug) {
       return buildDownloadUrl(residFromUrl, authFromUrl);
     }
 
-    // HTML geldiyse içinden resid/authkey yakalamayı dene
-    const ct = resp.headers.get("content-type") || "";
+    // 3) HTML/boş content-type durumlarında body’yi incele (OneDrive bazen burada JS/meta refresh veriyor)
+    const ct = (resp.headers.get("content-type") || "").toLowerCase();
     debug.contentType = ct;
 
-    if (ct.includes("text/html")) {
-      const html = await resp.text();
+    const text = await resp.text();
 
-      const residMatch = html.match(/resid=([^&"'<\s]+)/i);
-      const authMatch = html.match(/authkey=([^&"'<\s]+)/i);
-      if (residMatch && authMatch) {
-        debug.resolvedBy = "html_regex";
-        return buildDownloadUrl(residMatch[1], authMatch[1]);
-      }
-
-      const dlMatch = html.match(/https:\/\/onedrive\.live\.com\/download[^"'<\s]+/i);
-      if (dlMatch) {
-        debug.resolvedBy = "html_download_url";
-        return dlMatch[0];
-      }
+    // 3a) meta refresh ile yönlendirme
+    const meta = text.match(/http-equiv=["']refresh["'][^>]*content=["'][^"']*url=([^"']+)["']/i);
+    if (meta?.[1]) {
+      cur = absUrl(meta[1], cur);
+      continue;
     }
 
-    break;
+    // 3b) JS yönlendirme (window.location / location.href)
+    const js = text.match(/(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']/i);
+    if (js?.[1]) {
+      cur = absUrl(js[1], cur);
+      continue;
+    }
+
+    // 3c) Sayfa içinde onedrive.live.com linki ara
+    const urls = [...text.matchAll(/https?:\/\/[^"'<> \n]+/g)].map(m => m[0]);
+
+    // Önce doğrudan download linki yakala
+    const directDl = urls.find(u => /onedrive\.live\.com\/download/i.test(u));
+    if (directDl) {
+      debug.resolvedBy = "html_download_url";
+      return directDl;
+    }
+
+    // Sonra embed linkinden resid/authkey yakala
+    const embed = urls.find(u => /onedrive\.live\.com\/embed/i.test(u) && /resid=/i.test(u) && /authkey=/i.test(u));
+    if (embed) {
+      debug.resolvedBy = "html_embed_url";
+      const resid = pickParam(embed, "resid");
+      const auth = pickParam(embed, "authkey");
+      if (resid && auth) return buildDownloadUrl(resid, auth);
+    }
+
+    // Son olarak onedrive.live.com’a giden herhangi bir linki takip et
+    const anyLive = urls.find(u => /onedrive\.live\.com/i.test(u));
+    if (anyLive) {
+      cur = anyLive;
+      continue;
+    }
+
+    throw new Error("HTML içinde yönlendirme/download linki bulunamadı.");
   }
 
-  throw new Error("Redirect zincirinden indirilebilir (resid/authkey) link üretemedim.");
+  throw new Error("Redirect zinciri çok uzadı, indirilebilir link üretilemedi.");
 }
+
 
 exports.handler = async () => {
   const debug = {
