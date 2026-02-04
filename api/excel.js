@@ -13,6 +13,18 @@ function isRedirect(status) {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
+function uaHeaders() {
+  return {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept":
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+  };
+}
+
+// 1drv.ms / onedrive.live.com redirect zincirini çözer.
+// A yöntemi çalışıyorsa finalUrl login.live.com OLMAMALI.
 async function resolveRedirectChain(startUrl, maxHops = 12) {
   let url = startUrl;
   const visited = [];
@@ -23,13 +35,7 @@ async function resolveRedirectChain(startUrl, maxHops = 12) {
     const r = await fetch(url, {
       method: "GET",
       redirect: "manual",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept":
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
-      },
+      headers: uaHeaders(),
     });
 
     if (!isRedirect(r.status)) {
@@ -45,30 +51,18 @@ async function resolveRedirectChain(startUrl, maxHops = 12) {
 
     const loc = r.headers.get("location");
     if (!loc) {
-      return {
-        ok: false,
-        finalStatus: r.status,
-        finalUrl: url,
-        visited,
-        error: "Redirect var ama Location header yok",
-      };
+      return { ok: false, finalStatus: r.status, finalUrl: url, visited, error: "No Location header" };
     }
 
     url = new URL(loc, url).toString();
   }
 
-  return {
-    ok: false,
-    finalStatus: 0,
-    finalUrl: url,
-    visited,
-    error: `Max hops (${maxHops}) aşıldı`,
-  };
+  return { ok: false, finalStatus: 0, finalUrl: url, visited, error: `Max hops (${maxHops}) exceeded` };
 }
 
 module.exports = async (req, res) => {
   try {
-    const mode = (req.query.mode || "resolve").toString();
+    const mode = (req.query.mode || "resolve").toString(); // resolve | download | parse
     const shareUrl = req.query.url ? req.query.url.toString() : null;
 
     if (!shareUrl) {
@@ -76,76 +70,91 @@ module.exports = async (req, res) => {
       return;
     }
 
+    // ADIM 1: resolve (link anonim mi?)
     if (mode === "resolve") {
       const resolved = await resolveRedirectChain(shareUrl, 12);
-      res.status(200).json(resolved);
+      const host = (() => { try { return new URL(resolved.finalUrl).host; } catch { return null; } })();
+
+      res.status(200).json({
+        ...resolved,
+        finalHost: host,
+        isLogin: host ? host.includes("login.live.com") : false,
+        note: host?.includes("login.live.com")
+          ? "❌ Login istiyor: Link 'Anyone' değil veya dosya erişimi kısıtlı."
+          : "✅ Login’e düşmüyor: İndirme testine geçebilirsin (mode=download).",
+      });
       return;
     }
 
-    if (mode === "download" || mode === "parse") {
-      const resolved = await resolveRedirectChain(shareUrl, 12);
+    // ADIM 2/3: download veya parse
+    const resolved = await resolveRedirectChain(shareUrl, 12);
+    const finalHost = (() => { try { return new URL(resolved.finalUrl).host; } catch { return null; } })();
 
-      // login'e düşüyorsa burada dur
-      let host = null;
-      try { host = new URL(resolved.finalUrl).host; } catch {}
-      if (host && host.includes("login.live.com")) {
-        res.status(200).json({
-          ok: false,
-          error: "Login required (link anonymous değil veya erişim kısıtlı).",
-          resolved
-        });
-        return;
-      }
-
-      const r = await fetch(resolved.finalUrl, {
-        method: "GET",
-        redirect: "follow",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "*/*"
-        },
+    if (finalHost && finalHost.includes("login.live.com")) {
+      res.status(200).json({
+        ok: false,
+        step: "resolve",
+        error: "Login required. Link 'Anyone with the link' değil veya guest access kapalı.",
+        resolved,
       });
+      return;
+    }
 
-      if (!r.ok) {
-        res.status(200).json({
-          step: "download",
-          ok: false,
-          httpStatus: r.status,
-          contentType: r.headers.get("content-type"),
-          bodySnippet: await safeText(r),
-          resolved
-        });
-        return;
-      }
+    const r = await fetch(resolved.finalUrl, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "User-Agent": uaHeaders()["User-Agent"],
+        "Accept": "*/*",
+      },
+    });
 
-      const buf = Buffer.from(await r.arrayBuffer());
+    if (!r.ok) {
+      res.status(200).json({
+        ok: false,
+        step: "download",
+        httpStatus: r.status,
+        contentType: r.headers.get("content-type"),
+        bodySnippet: await safeText(r),
+        resolved,
+      });
+      return;
+    }
 
-      if (mode === "download") {
-        res.status(200).json({
-          step: "download",
-          ok: true,
-          httpStatus: r.status,
-          contentType: r.headers.get("content-type"),
-          bytes: buf.length,
-          firstBytesHex: buf.slice(0, 16).toString("hex"),
-          resolved
-        });
-        return;
-      }
+    const buf = Buffer.from(await r.arrayBuffer());
 
-      // parse
+    // ADIM 2: download sonucu
+    if (mode === "download") {
+      res.status(200).json({
+        ok: true,
+        step: "download",
+        httpStatus: r.status,
+        contentType: r.headers.get("content-type"),
+        bytes: buf.length,
+        // XLSX genelde ZIP ile başlar: "PK" -> 504b
+        first4Hex: buf.slice(0, 4).toString("hex"),
+        looksLikeXlsx: buf.slice(0, 2).toString("utf8") === "PK",
+        note:
+          buf.slice(0, 2).toString("utf8") === "PK"
+            ? "✅ XLSX/ZIP imzası (PK) görünüyor. Parse’a geçebilirsin (mode=parse)."
+            : "⚠️ PK değilse HTML/redirect sayfası olabilir. contentType ve snippet’e bak.",
+        resolved,
+      });
+      return;
+    }
+
+    // ADIM 3: parse
+    if (mode === "parse") {
       const wb = XLSX.read(buf, { type: "buffer" });
-      const firstSheetName = wb.SheetNames[0];
-      const ws = wb.Sheets[firstSheetName];
-      const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+      const sheet = wb.SheetNames[0];
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: null });
 
       res.status(200).json({
-        step: "parse",
         ok: true,
-        sheet: firstSheetName,
+        step: "parse",
+        sheet,
         rowCount: rows.length,
-        rows
+        rows,
       });
       return;
     }
