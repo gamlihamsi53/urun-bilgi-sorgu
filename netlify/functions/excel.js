@@ -1,7 +1,7 @@
 const XLSX = require("xlsx");
 
-const ONEDRIVE_XLSX_URL =
-  "https://onedrive.live.com/download?resid=5E38CF4DF60786E7!8341D4774B0845D1987763213E7BE629&authkey=!ABCDEF123456";
+// ✅ Buraya OneDrive paylaşım linkini (1drv.ms) koy
+const SHARE_URL = "PASTE_YOUR_1DRV_MS_LINK_HERE";
 
 const SHEET_NAME = "Mal Tanımı";
 const COL_KEY = "Ürün Açıklaması";
@@ -25,42 +25,78 @@ function normalizeTR(s) {
     .replace(/\s+/g, " ");
 }
 
+// OneDrive share URL -> shareId (base64url)
+function toShareId(url) {
+  const b64 = Buffer.from(url, "utf8").toString("base64");
+  const b64url = b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return "u!" + b64url;
+}
+
 exports.handler = async () => {
+  const debug = {
+    step: "start",
+    shareUrlHost: null,
+    contentType: null
+  };
+
   try {
-    if (!ONEDRIVE_XLSX_URL) {
+    if (!SHARE_URL || SHARE_URL.includes("PASTE_")) {
       return {
         statusCode: 500,
         headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify({ error: "ONEDRIVE_XLSX_URL boş." })
+        body: JSON.stringify({ error: "SHARE_URL ayarlanmadı (1drv.ms linkini yapıştır).", debug })
       };
     }
 
-    // Netlify cache: 10 dk taze, 1 gün stale-while-revalidate
+    debug.shareUrlHost = (() => {
+      try { return new URL(SHARE_URL).host; } catch { return "invalid-url"; }
+    })();
+
+    // Netlify cache
     const headers = {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "public, max-age=600, stale-while-revalidate=86400"
     };
 
-    const resp = await fetch(ONEDRIVE_XLSX_URL, { redirect: "follow" });
-    if (!resp.ok) {
-      throw new Error("OneDrive HTTP " + resp.status);
+    // 1) ShareId oluştur
+    debug.step = "shareId";
+    const shareId = toShareId(SHARE_URL);
+
+    // 2) “shares” endpoint’inden driveItem bilgisi al (downloadUrl almak için)
+    // Bu endpoint public share linklerle çalışır.
+    debug.step = "shares_api";
+    const metaUrl = `https://api.onedrive.com/v1.0/shares/${shareId}/driveItem?$select=id,name,@microsoft.graph.downloadUrl`;
+
+    const metaResp = await fetch(metaUrl, { redirect: "follow" });
+    if (!metaResp.ok) {
+      throw new Error(`shares meta HTTP ${metaResp.status}`);
+    }
+    const meta = await metaResp.json();
+
+    const downloadUrl = meta?.["@microsoft.graph.downloadUrl"];
+    if (!downloadUrl) {
+      throw new Error("downloadUrl bulunamadı (paylaşım linki view değil mi?).");
     }
 
-    const contentType = resp.headers.get("content-type") || "";
-    const buf = await resp.arrayBuffer();
-
-    // OneDrive bazen HTML sayfa döndürebiliyor (indirilemediyse).
-    // XLSX okumadan önce hızlı kontrol:
-    if (contentType.includes("text/html")) {
-      throw new Error("OneDrive HTML döndürdü (download link doğru mu?).");
+    // 3) Dosyayı gerçek downloadUrl’den indir
+    debug.step = "download_binary";
+    const fileResp = await fetch(downloadUrl, { redirect: "follow" });
+    if (!fileResp.ok) {
+      throw new Error(`download HTTP ${fileResp.status}`);
     }
+    debug.contentType = fileResp.headers.get("content-type") || "";
+    const buf = await fileResp.arrayBuffer();
 
+    // 4) XLSX parse
+    debug.step = "xlsx_parse";
     const wb = XLSX.read(buf, { type: "array" });
     const ws = wb.Sheets[SHEET_NAME];
-    if (!ws) throw new Error(`Sheet bulunamadı: "${SHEET_NAME}"`);
+    if (!ws) throw new Error(`Sheet bulunamadı: "${SHEET_NAME}" (mevcut: ${wb.SheetNames.join(", ")})`);
 
     const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
+    // 5) Autocomplete + map
+    debug.step = "build_map";
     const items = [];
     const map = {};
 
@@ -78,6 +114,8 @@ exports.handler = async () => {
       map[norm] = payload;
     }
 
+    debug.step = "done";
+
     return {
       statusCode: 200,
       headers,
@@ -94,7 +132,10 @@ exports.handler = async () => {
     return {
       statusCode: 500,
       headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ error: e?.message || String(e) })
+      body: JSON.stringify({
+        error: e?.message || String(e),
+        debug
+      })
     };
   }
 };
