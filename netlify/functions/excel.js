@@ -1,6 +1,10 @@
 // netlify/functions/excel.js
-// mode=resolve  -> 1drv.ms redirect zincirini çözer, final URL'i verir
-// mode=download -> çözdüğü final URL üzerinden indirir, byte sayısını döndürür
+// MODES:
+//  - resolve : 1drv.ms redirect zincirini çözer (login mi, public mi?)
+//  - download: indirip byte sayısını döndürür (xlsx mi geliyor?)
+//  - parse   : indirip ilk sheet'i JSON döndürür (xlsx paketi gerekir)
+
+const XLSX = require("xlsx");
 
 async function safeText(resp, n = 300) {
   try {
@@ -15,7 +19,7 @@ function isRedirect(status) {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-async function resolveRedirectChain(startUrl, maxHops = 10) {
+async function resolveRedirectChain(startUrl, maxHops = 12) {
   let url = startUrl;
   const visited = [];
 
@@ -26,7 +30,6 @@ async function resolveRedirectChain(startUrl, maxHops = 10) {
       method: "GET",
       redirect: "manual",
       headers: {
-        // Tarayıcı gibi görünmek 1drv.ms tarafında kritik olabiliyor
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept":
@@ -35,7 +38,6 @@ async function resolveRedirectChain(startUrl, maxHops = 10) {
       },
     });
 
-    // redirect değilse burada dururuz
     if (!isRedirect(r.status)) {
       return {
         ok: r.ok,
@@ -58,7 +60,6 @@ async function resolveRedirectChain(startUrl, maxHops = 10) {
       };
     }
 
-    // relative olabilir
     url = new URL(loc, url).toString();
   }
 
@@ -85,29 +86,42 @@ exports.handler = async function (event) {
       };
     }
 
+    // 1) resolve
     if (mode === "resolve") {
-      const result = await resolveRedirectChain(shareUrl, 12);
+      const resolved = await resolveRedirectChain(shareUrl, 12);
       return {
         statusCode: 200,
         headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify(result),
+        body: JSON.stringify(resolved),
       };
     }
 
-    if (mode === "download") {
-      // Önce çöz
+    // 2) download
+    if (mode === "download" || mode === "parse") {
       const resolved = await resolveRedirectChain(shareUrl, 12);
 
-      // Eğer çözme aşamasında redirect olmayan 4xx/5xx aldıysak, indirmenin anlamı yok
-      if (!resolved || (!resolved.ok && resolved.finalStatus >= 400)) {
+      // login'e düştüyse burada durdur
+      const host = (() => {
+        try {
+          return new URL(resolved.finalUrl).host;
+        } catch {
+          return null;
+        }
+      })();
+
+      if (host && host.includes("login.live.com")) {
         return {
           statusCode: 200,
           headers: { "content-type": "application/json; charset=utf-8" },
-          body: JSON.stringify({ step: "resolve", resolved }),
+          body: JSON.stringify({
+            ok: false,
+            error: "Login required (link anonymous değil veya erişim kısıtlı).",
+            resolved,
+          }),
         };
       }
 
-      // Çözülen URL ile indir
+      // indir
       const r = await fetch(resolved.finalUrl, {
         method: "GET",
         redirect: "follow",
@@ -134,17 +148,39 @@ exports.handler = async function (event) {
       }
 
       const buf = Buffer.from(await r.arrayBuffer());
+
+      // sadece download sonucu
+      if (mode === "download") {
+        return {
+          statusCode: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify({
+            step: "download",
+            ok: true,
+            httpStatus: r.status,
+            contentType: r.headers.get("content-type"),
+            bytes: buf.length,
+            firstBytesHex: buf.slice(0, 16).toString("hex"),
+            resolved,
+          }),
+        };
+      }
+
+      // 3) parse
+      const wb = XLSX.read(buf, { type: "buffer" });
+      const firstSheetName = wb.SheetNames[0];
+      const ws = wb.Sheets[firstSheetName];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+
       return {
         statusCode: 200,
         headers: { "content-type": "application/json; charset=utf-8" },
         body: JSON.stringify({
-          step: "download",
+          step: "parse",
           ok: true,
-          httpStatus: r.status,
-          contentType: r.headers.get("content-type"),
-          bytes: buf.length,
-          firstBytesHex: buf.slice(0, 16).toString("hex"),
-          resolved,
+          sheet: firstSheetName,
+          rowCount: rows.length,
+          rows,
         }),
       };
     }
@@ -152,7 +188,7 @@ exports.handler = async function (event) {
     return {
       statusCode: 400,
       headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ error: "Invalid mode. Use resolve|download" }),
+      body: JSON.stringify({ error: "Invalid mode. Use resolve|download|parse" }),
     };
   } catch (e) {
     return {
