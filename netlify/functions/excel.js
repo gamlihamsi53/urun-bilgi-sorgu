@@ -1,197 +1,100 @@
-const XLSX = require("xlsx");
+// netlify/functions/excel.js
 
-// ✅ Buraya OneDrive paylaşım linkini (1drv.ms) koy
-const SHARE_URL = "https://1drv.ms/x/c/5e38cf4df60786e7/IQDRH_yMYQbeS7QHKUC0YdnrAaG1m5KBMun6eBzFMrsotRU?e=7a1Jst";
-
-const SHEET_NAME = "Mal Tanımı";
-const COL_KEY = "Ürün Açıklaması";
-
-const FIELDS = [
-  "KDV Oranı",
-  "Birim",
-  "Alış Fiyatı (KDV Hariç)",
-  "Son Satın Alma Tarihi",
-  "Liste Fiyatı (KDV Hariç)",
-  "Son Liste Fiyat Güncelleme Tarihi",
-  "Marj",
-  "Stok"
-];
-
-function normalizeTR(s) {
-  return (s ?? "")
-    .toString()
-    .trim()
-    .toLocaleLowerCase("tr-TR")
-    .replace(/\s+/g, " ");
+function toShareToken(shareUrl) {
+  const b64 = Buffer.from(shareUrl, "utf8").toString("base64");
+  const b64url = b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return "u!" + b64url;
 }
 
-function absUrl(next, base) {
-  try { return new URL(next, base).toString(); } catch { return next; }
-}
-
-function pickParam(urlStr, key) {
+async function safeText(resp, n = 300) {
   try {
-    const u = new URL(urlStr);
-    return u.searchParams.get(key);
+    const t = await resp.text();
+    return t.slice(0, n);
   } catch {
     return null;
   }
 }
 
-function buildDownloadUrl(resid, authkey) {
-  return `https://onedrive.live.com/download?resid=${encodeURIComponent(resid)}&authkey=${encodeURIComponent(authkey)}`;
-}
-
-async function resolveToDownloadUrl(shareUrl, debug) {
-  let cur = shareUrl;
-
-  for (let i = 0; i < 15; i++) {
-    debug.step = `redirect_${i}`;
-    const resp = await fetch(cur, { redirect: "manual" });
-
-    // 1) Header redirect
-    if ([301, 302, 303, 307, 308].includes(resp.status)) {
-      const loc = resp.headers.get("location");
-      if (!loc) throw new Error(`Redirect HTTP ${resp.status} ama Location yok`);
-      cur = absUrl(loc, cur);
-      continue;
-    }
-
-    // Redirect değilse status kontrol
-    if (!resp.ok) {
-      throw new Error(`Redirect olmayan cevap: HTTP ${resp.status}`);
-    }
-
-    // 2) URL üzerinde resid/authkey var mı?
-    const residFromUrl = pickParam(cur, "resid");
-    const authFromUrl = pickParam(cur, "authkey");
-    if (residFromUrl && authFromUrl) {
-      debug.resolvedBy = "url_params";
-      return buildDownloadUrl(residFromUrl, authFromUrl);
-    }
-
-    // 3) HTML/boş content-type durumlarında body’yi incele (OneDrive bazen burada JS/meta refresh veriyor)
-    const ct = (resp.headers.get("content-type") || "").toLowerCase();
-    debug.contentType = ct;
-
-    const text = await resp.text();
-
-    // 3a) meta refresh ile yönlendirme
-    const meta = text.match(/http-equiv=["']refresh["'][^>]*content=["'][^"']*url=([^"']+)["']/i);
-    if (meta?.[1]) {
-      cur = absUrl(meta[1], cur);
-      continue;
-    }
-
-    // 3b) JS yönlendirme (window.location / location.href)
-    const js = text.match(/(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']/i);
-    if (js?.[1]) {
-      cur = absUrl(js[1], cur);
-      continue;
-    }
-
-    // 3c) Sayfa içinde onedrive.live.com linki ara
-    const urls = [...text.matchAll(/https?:\/\/[^"'<> \n]+/g)].map(m => m[0]);
-
-    // Önce doğrudan download linki yakala
-    const directDl = urls.find(u => /onedrive\.live\.com\/download/i.test(u));
-    if (directDl) {
-      debug.resolvedBy = "html_download_url";
-      return directDl;
-    }
-
-    // Sonra embed linkinden resid/authkey yakala
-    const embed = urls.find(u => /onedrive\.live\.com\/embed/i.test(u) && /resid=/i.test(u) && /authkey=/i.test(u));
-    if (embed) {
-      debug.resolvedBy = "html_embed_url";
-      const resid = pickParam(embed, "resid");
-      const auth = pickParam(embed, "authkey");
-      if (resid && auth) return buildDownloadUrl(resid, auth);
-    }
-
-    // Son olarak onedrive.live.com’a giden herhangi bir linki takip et
-    const anyLive = urls.find(u => /onedrive\.live\.com/i.test(u));
-    if (anyLive) {
-      cur = anyLive;
-      continue;
-    }
-
-    throw new Error("HTML içinde yönlendirme/download linki bulunamadı.");
-  }
-
-  throw new Error("Redirect zinciri çok uzadı, indirilebilir link üretilemedi.");
-}
-
-
-exports.handler = async () => {
-  const debug = {
-    step: "start",
-    shareUrlHost: null,
-    contentType: null,
-    resolvedBy: null
-  };
-
+export async function handler(event) {
   try {
-    debug.shareUrlHost = (() => {
-      try { return new URL(SHARE_URL).host; } catch { return "invalid-url"; }
-    })();
-
-    const headers = {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=600, stale-while-revalidate=86400"
-    };
-
-    debug.step = "resolve_download_url";
-    const downloadUrl = await resolveToDownloadUrl(SHARE_URL, debug);
-
-    debug.step = "download_binary";
-    const fileResp = await fetch(downloadUrl, { redirect: "follow" });
-    if (!fileResp.ok) throw new Error(`download HTTP ${fileResp.status}`);
-
-    const buf = await fileResp.arrayBuffer();
-
-    debug.step = "xlsx_parse";
-    const wb = XLSX.read(buf, { type: "array" });
-    const ws = wb.Sheets[SHEET_NAME];
-    if (!ws) throw new Error(`Sheet bulunamadı: "${SHEET_NAME}" (mevcut: ${wb.SheetNames.join(", ")})`);
-
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-
-    debug.step = "build_map";
-    const items = [];
-    const map = {};
-
-    for (const r of rows) {
-      const key = r[COL_KEY];
-      if (!key) continue;
-
-      const name = key.toString();
-      const norm = normalizeTR(name);
-
-      const payload = { [COL_KEY]: name };
-      for (const f of FIELDS) payload[f] = r[f] ?? "";
-
-      items.push(name);
-      map[norm] = payload;
+    const shareUrl = event.queryStringParameters?.url;
+    const mode = event.queryStringParameters?.mode || "ping";
+    if (!shareUrl) {
+      return { statusCode: 400, body: JSON.stringify({ error: "Missing ?url=" }) };
     }
 
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify({
-        updatedAt: new Date().toISOString(),
-        sheet: SHEET_NAME,
-        keyColumn: COL_KEY,
-        fields: FIELDS,
-        items,
-        map
-      })
-    };
+    const shareToken = toShareToken(shareUrl);
+    const contentUrl = `https://api.onedrive.com/v1.0/shares/${shareToken}/root/content`;
+
+    // ping: sadece response status/headers gör
+    if (mode === "ping") {
+      const r = await fetch(contentUrl, {
+        method: "GET",
+        redirect: "manual", // önemli: redirect takip ETME
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "*/*" },
+      });
+
+      // Not: manual redirect'te 302 bekleyebilirsin (bu iyi işaret!)
+      const location = r.headers.get("location");
+      const ct = r.headers.get("content-type");
+      const cl = r.headers.get("content-length");
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          ok: r.ok,
+          httpStatus: r.status,
+          hasLocation: !!location,
+          locationHost: location ? new URL(location).host : null,
+          contentType: ct,
+          contentLength: cl,
+          note:
+            r.status >= 300 && r.status < 400
+              ? "302/301 aldıysan iyi: redirect var, erişim var."
+              : r.ok
+              ? "200 aldıysan çok iyi: direkt içerik dönmüş."
+              : "4xx/5xx ise izin/link tipi sorunu olabilir.",
+          bodySnippet: r.ok ? null : await safeText(r),
+        }),
+      };
+    }
+
+    // download: redirect takip et, dosyayı gerçekten indir, sadece boyut döndür
+    if (mode === "download") {
+      const r = await fetch(contentUrl, {
+        method: "GET",
+        redirect: "follow",
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "*/*" },
+      });
+
+      if (!r.ok) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            ok: false,
+            httpStatus: r.status,
+            contentType: r.headers.get("content-type"),
+            bodySnippet: await safeText(r),
+          }),
+        };
+      }
+
+      const buf = Buffer.from(await r.arrayBuffer());
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          ok: true,
+          httpStatus: r.status,
+          contentType: r.headers.get("content-type"),
+          bytes: buf.length,
+          firstBytesHex: buf.slice(0, 12).toString("hex"), // hızlı sanity check
+          note: "bytes > 0 ise indirme çalışıyor.",
+        }),
+      };
+    }
+
+    return { statusCode: 400, body: JSON.stringify({ error: "Invalid mode. Use ping|download" }) };
   } catch (e) {
-    return {
-      statusCode: 500,
-      headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ error: e?.message || String(e), debug })
-    };
+    return { statusCode: 500, body: JSON.stringify({ error: String(e) }) };
   }
-};
+}
